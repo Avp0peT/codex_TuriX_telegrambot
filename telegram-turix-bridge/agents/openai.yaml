@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram TuriX Bridge"
+  short_description: "Run a Windows Telegram bot that can forward chat to local Codex and TuriX."
+  default_prompt: "Use $telegram-turix-bridge to set up or run a Windows Telegram bot that forwards messages to local Codex and TuriX."
