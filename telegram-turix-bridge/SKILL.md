@@ -37,8 +37,11 @@ powershell -ExecutionPolicy Bypass -File "{baseDir}\scripts\launch_bot.ps1"
 1. Keep the bot private or use a strict `TELEGRAM_ALLOWED_CHAT_ID` allowlist.
 2. Use `/chatid` once to discover the chat id to allow.
 3. Use `/codex` or `/codexw` to switch the chat into Codex mode.
-4. Use `/run` or `/turix` to switch the chat back to TuriX mode.
-5. Use `/status` or `/logs` only when you need debug details.
+4. Plain text in Codex mode continues in the same saved Codex session for that Telegram chat.
+5. Use `/newsession` when you want a fresh Codex context without deleting older ones.
+6. Use `/switchsession` to jump back to a saved Codex session.
+7. Use `/run` or `/turix` to switch the chat back to TuriX mode.
+8. Use `/status` or `/logs` only when you need debug details.
 
 ## Telegram Commands
 
@@ -50,14 +53,26 @@ powershell -ExecutionPolicy Bypass -File "{baseDir}\scripts\launch_bot.ps1"
   Return the current chat id.
 - `/mode`
   Show the current plain-text mode for this chat.
-- `/codex <prompt>`
-  Run local Codex in read-only mode and switch plain text to Codex.
-- `/codexw <prompt>`
-  Run local Codex in workspace-write mode and switch plain text to Codex write mode.
+- `/session`
+  Show the current Codex session binding for this chat.
+- `/sessions`
+  List saved Codex sessions for this chat.
+- `/newsession [label]`
+  Create and switch to a fresh Codex session slot.
+- `/switchsession <ref>`
+  Switch to a saved Codex session by index, bridge id, label, or Codex session id.
+- `/renamesession <label>`
+  Rename the current Codex session slot.
+- `/dropsession <ref>`
+  Forget a saved Codex session slot from bridge state.
+- `/codex [prompt]`
+  Switch to Codex read-only mode and optionally send a prompt immediately.
+- `/codexw [prompt]`
+  Switch to Codex workspace-write mode and optionally send a prompt immediately.
 - `/run <task>`
   Start a local TuriX task and switch plain text back to TuriX.
-- `/turix <task>`
-  Same as `/run`.
+- `/turix [task]`
+  Same as `/run`, but can also be used without a task to only switch modes.
 - `/dryrun <task>`
   Run the TuriX launcher in `--dry-run` mode.
 - `/resume <agent_id>`
@@ -70,8 +85,9 @@ powershell -ExecutionPolicy Bypass -File "{baseDir}\scripts\launch_bot.ps1"
   Stop the active process tree.
 
 Plain text follows the current chat mode:
-- After `/codex`, plain text goes to Codex read-only.
-- After `/codexw`, plain text goes to Codex workspace-write.
+
+- After `/codex`, plain text continues in the current chat-bound Codex session.
+- After `/codexw`, plain text continues in the current chat-bound Codex write session.
 - After `/run` or `/turix`, plain text goes to TuriX.
 
 ## Required Environment Variables
@@ -112,6 +128,6 @@ Plain text follows the current chat mode:
 ## Resources
 
 - `scripts/telegram_turix_bridge.py`
-  Standard-library Telegram bridge for Codex and TuriX.
+  Standard-library Telegram bridge for Codex and TuriX, with per-chat persistent Codex sessions.
 - `scripts/launch_bot.ps1`
   Windows launcher and preflight checker.

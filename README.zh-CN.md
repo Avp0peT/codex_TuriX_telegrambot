@@ -1,34 +1,31 @@
 # codex_TuriX_telegrambot
 
-这是一个面向 Windows 的 Telegram 桥接 skill，可以让你通过 Telegram 机器人与本地 Codex 和本地 TuriX 交互。
+这是一个面向 Windows 本地运行的 Telegram bridge skill，用来通过 Telegram 机器人和本地 Codex、TuriX 交互。
 
 [English README](./README.md)
 
 ## 项目简介
 
-这个仓库包含一个公开可发布、已脱敏的本地 Codex skill，名字叫 `telegram-turix-bridge`。
+这个仓库包含 `telegram-turix-bridge` skill 的公开脱敏版本。
 
 它适合这些场景：
-- 在 Telegram 里和本地 Codex 对话
+
+- 在 Telegram 里和本地 Codex 持续对话
 - 在 Telegram 里触发本地 TuriX 桌面自动化
-- 在同一个机器人聊天里在 Codex 和 TuriX 之间切换
-- 把 token、chat id、日志、运行状态保留在本地，不上传到仓库
+- 在同一个 bot 聊天中在 Codex 和 TuriX 之间切换
+- 把 token、chat id、日志和运行状态保留在本地，不上传到仓库
 
-这个桥接器运行在本地 Windows 上，使用 Telegram 长轮询，不依赖独立服务器。
+这个 bridge 运行在本地 Windows 上，使用 Telegram long polling，不依赖单独的后端服务。
 
-## 功能特性
+## 主要能力
 
 - 通过 `codex exec` 把 Telegram 消息转给本地 Codex
 - 通过本地 `run_turix.ps1` 把 Telegram 消息转给 TuriX
-- 按聊天记住当前模式
-  发过 `/codex` 后，后续普通文本默认继续走 Codex
-  发过 `/codexw` 后，后续普通文本默认继续走 Codex 写入模式
-  发过 `/run` 或 `/turix` 后，普通文本切回 TuriX
-- 默认对话输出更干净
-  正常聊天只显示正常回复
-  调试信息通过 `/status` 和 `/logs` 单独查看
-- 公开仓库可安全发布
-  不包含 token、chat id、运行日志、运行状态和个人机器信息
+- 按 chat 持久保存 Codex 会话
+- 提供会话管理命令：新建、查看、切换、重命名、删除
+- 按 chat 记住当前模式
+- 默认对话输出保持干净，调试信息通过 `/status` 和 `/logs` 查看
+- 公开仓库不包含 token、chat id、运行日志和状态文件
 
 ## 仓库结构
 
@@ -41,19 +38,12 @@ telegram-turix-bridge/
     telegram_turix_bridge.py
 ```
 
-## 仓库中包含的内容
-
-- 一个可被 Codex 自动发现的 skill 目录 `telegram-turix-bridge/`
-- 一个基于 Python 标准库实现的 Telegram bridge
-- 一个适用于 Windows 的 PowerShell 启动脚本
-- 面向公开使用的安装与配置说明
-
-## 仓库中刻意不包含的内容
+## 不包含的内容
 
 - Telegram bot token
 - 允许访问的 chat id
 - 运行日志
-- 本地状态文件
+- 状态文件
 - 个人机器路径
 - 私有部署细节
 
@@ -65,9 +55,9 @@ telegram-turix-bridge/
 Copy-Item -Recurse -Force .\telegram-turix-bridge "$HOME\.codex\skills\telegram-turix-bridge"
 ```
 
-如果你还希望支持 TuriX，请先准备好本地 `turix-cua` skill，并确认它的 `run_turix.ps1` 存在。
+如果还要支持 TuriX，请先准备好本地 `turix-cua` skill，并确保它的 `run_turix.ps1` 存在。
 
-## 必填环境变量
+## 必需环境变量
 
 ```powershell
 $env:TELEGRAM_BOT_TOKEN = "123456:bot-token"
@@ -93,7 +83,7 @@ $env:TELEGRAM_POLL_TIMEOUT = "30"
 
 ## 启动方式
 
-先做预检查：
+先执行预检查：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_bot.ps1 -Check
@@ -105,36 +95,58 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_bot.ps1
 ```
 
-## Telegram 支持的命令
+## Telegram 命令
 
 - `/chatid`
 - `/mode`
-- `/codex <prompt>`
-- `/codexw <prompt>`
+- `/session`
+- `/sessions`
+- `/newsession [label]`
+- `/switchsession <ref>`
+- `/renamesession <label>`
+- `/dropsession <ref>`
+- `/codex [prompt]`
+- `/codexw [prompt]`
 - `/run <task>`
-- `/turix <task>`
+- `/turix [task]`
 - `/dryrun <task>`
 - `/resume <agent_id>`
 - `/status`
 - `/logs [N]`
 - `/stop`
 
-## 常见使用方式
+## 持续会话如何工作
 
-先切到 Codex 对话模式：
+- 每个 Telegram chat 都有自己的一组 Codex 会话槽位。
+- 第一次发送 `/codex` 时，会为当前 chat 启动一个新的 Codex 会话。
+- 之后在 Codex 模式下发送普通文本，会通过 `codex exec resume <session-id>` 继续同一个上下文。
+- `/newsession` 会创建一个新的会话槽位，但不会删除旧会话。
+- `/switchsession` 可以按序号、bridge 会话 id、标签名或 Codex session id 切回旧会话。
+
+## 典型用法
+
+开始一个持续 Codex 对话：
 
 ```text
 /codex 解释一下当前项目结构
-再用中文总结一下
+再用中文总结一遍
+接下来最值得优先处理的风险是什么
 ```
 
-再切回 TuriX：
+新开一个独立会话：
+
+```text
+/newsession release-notes
+/codex 为最新的 bridge 改动起草一份发布说明
+```
+
+切换到 TuriX：
 
 ```text
 /turix 打开 Edge 并访问 github.com
 ```
 
-需要调试时再看状态：
+需要时再查看调试信息：
 
 ```text
 /status
@@ -146,9 +158,9 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 - 不要把 `TELEGRAM_BOT_TOKEN` 提交到仓库
 - 尽量使用私聊 bot，或严格设置 `TELEGRAM_ALLOWED_CHAT_ID`
 - 默认把 `/codex` 保持在 `read-only`
-- 只有在可信私聊中才使用 `/codexw`
+- 只在可信私聊里使用 `/codexw`
 - 不要提交 `runtime/`、日志或状态文件
 
 ## License
 
-当前仓库还没有单独的许可证文件；如果你准备长期公开分发，建议后续补上。
+当前仓库还没有单独的许可证文件；如果准备长期公开分发，建议补充。

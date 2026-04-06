@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,7 @@ STATE_FILE = RUNTIME_DIR / "state.json"
 DEFAULT_RUNNER = Path.home() / ".codex" / "skills" / "turix-cua" / "scripts" / "run_turix.ps1"
 DEFAULT_WORKDIR = Path.cwd()
 MAX_MESSAGE_LEN = 3500
+SESSION_ID_RE = re.compile(r"session id:\s*([0-9a-fA-F-]{36})", re.IGNORECASE)
 
 
 def ensure_runtime_dirs() -> None:
@@ -25,6 +27,10 @@ def ensure_runtime_dirs() -> None:
 def env(name: str, default: str = "") -> str:
     value = os.getenv(name, default)
     return value.strip() if isinstance(value, str) else default
+
+
+def now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def load_state() -> dict:
@@ -62,6 +68,175 @@ def set_chat_mode(state: dict, chat_id: str, *, engine: str, sandbox: str = "") 
     save_state(state)
 
 
+def codex_chats(state: dict) -> dict:
+    chats = state.get("codex_chats")
+    if isinstance(chats, dict):
+        return chats
+    chats = {}
+    state["codex_chats"] = chats
+    return chats
+
+
+def codex_chat_state(state: dict, chat_id: str) -> dict:
+    chats = codex_chats(state)
+    chat_state = chats.get(chat_id)
+    if not isinstance(chat_state, dict):
+        chat_state = {}
+        chats[chat_id] = chat_state
+    sessions = chat_state.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+        chat_state["sessions"] = sessions
+    if not isinstance(chat_state.get("current_session_key"), str):
+        chat_state["current_session_key"] = ""
+    if not isinstance(chat_state.get("next_session_number"), int):
+        chat_state["next_session_number"] = 1
+    return chat_state
+
+
+def codex_sessions(chat_state: dict) -> dict:
+    sessions = chat_state.get("sessions")
+    if isinstance(sessions, dict):
+        return sessions
+    sessions = {}
+    chat_state["sessions"] = sessions
+    return sessions
+
+
+def ordered_session_keys(chat_state: dict) -> list[str]:
+    sessions = codex_sessions(chat_state)
+    return sorted(sessions.keys(), key=lambda key: (int(sessions[key].get("created_index", 0)), key))
+
+
+def current_session_key(chat_state: dict) -> str:
+    key = chat_state.get("current_session_key")
+    return key if isinstance(key, str) else ""
+
+
+def get_session_entry(chat_state: dict, session_key: str) -> dict | None:
+    entry = codex_sessions(chat_state).get(session_key)
+    return entry if isinstance(entry, dict) else None
+
+
+def current_session_entry(chat_state: dict) -> dict | None:
+    key = current_session_key(chat_state)
+    if not key:
+        return None
+    return get_session_entry(chat_state, key)
+
+
+def normalize_label(label: str) -> str:
+    return " ".join(label.strip().split())[:80]
+
+
+def create_chat_session(
+    state: dict,
+    chat_id: str,
+    *,
+    label: str = "",
+    sandbox: str = "",
+    codex_session_id: str = "",
+) -> dict:
+    chat_state = codex_chat_state(state, chat_id)
+    created_index = int(chat_state.get("next_session_number", 1))
+    chat_state["next_session_number"] = created_index + 1
+    session_key = f"s{created_index:03d}"
+    session_label = normalize_label(label) or f"session-{created_index}"
+    entry = {
+        "session_key": session_key,
+        "label": session_label,
+        "codex_session_id": codex_session_id.strip(),
+        "sandbox": sandbox.strip(),
+        "created_at": now_text(),
+        "created_index": created_index,
+        "last_used_at": "",
+        "message_count": 0,
+        "last_log_path": "",
+        "last_reply_path": "",
+        "last_prompt": "",
+    }
+    codex_sessions(chat_state)[session_key] = entry
+    chat_state["current_session_key"] = session_key
+    save_state(state)
+    return entry
+
+
+def ensure_current_chat_session(state: dict, chat_id: str, *, sandbox: str = "") -> dict:
+    chat_state = codex_chat_state(state, chat_id)
+    entry = current_session_entry(chat_state)
+    if entry:
+        if sandbox:
+            entry["sandbox"] = sandbox
+            save_state(state)
+        return entry
+    return create_chat_session(state, chat_id, sandbox=sandbox)
+
+
+def parse_switch_ref(chat_state: dict, ref: str) -> dict | None:
+    target = ref.strip()
+    if not target:
+        return current_session_entry(chat_state)
+
+    entry = get_session_entry(chat_state, target)
+    if entry:
+        return entry
+
+    lowered = target.lower()
+    for session_key in ordered_session_keys(chat_state):
+        current = get_session_entry(chat_state, session_key)
+        if not current:
+            continue
+        if str(current.get("codex_session_id", "")).lower() == lowered:
+            return current
+        if str(current.get("label", "")).lower() == lowered:
+            return current
+
+    if target.isdigit():
+        index = int(target)
+        ordered = ordered_session_keys(chat_state)
+        if 1 <= index <= len(ordered):
+            return get_session_entry(chat_state, ordered[index - 1])
+
+    return None
+
+
+def switch_chat_session(state: dict, chat_id: str, ref: str) -> dict | None:
+    chat_state = codex_chat_state(state, chat_id)
+    entry = parse_switch_ref(chat_state, ref)
+    if not entry:
+        return None
+    chat_state["current_session_key"] = entry["session_key"]
+    save_state(state)
+    return entry
+
+
+def rename_current_chat_session(state: dict, chat_id: str, label: str) -> dict | None:
+    chat_state = codex_chat_state(state, chat_id)
+    entry = current_session_entry(chat_state)
+    if not entry:
+        return None
+    entry["label"] = normalize_label(label) or entry["label"]
+    save_state(state)
+    return entry
+
+
+def drop_chat_session(state: dict, chat_id: str, ref: str) -> tuple[dict | None, bool]:
+    chat_state = codex_chat_state(state, chat_id)
+    entry = parse_switch_ref(chat_state, ref)
+    if not entry:
+        return None, False
+
+    session_key = entry["session_key"]
+    was_current = current_session_key(chat_state) == session_key
+    codex_sessions(chat_state).pop(session_key, None)
+
+    remaining = ordered_session_keys(chat_state)
+    if was_current:
+        chat_state["current_session_key"] = remaining[-1] if remaining else ""
+    save_state(state)
+    return entry, was_current
+
+
 def telegram_token() -> str:
     return env("TELEGRAM_BOT_TOKEN")
 
@@ -94,16 +269,9 @@ def codex_cli() -> str:
 
 def codex_cli_resolved() -> str | None:
     raw = codex_cli()
-    candidates = [raw]
-    if raw.lower() == "codex":
-        candidates.extend(["codex.cmd", "codex.exe"])
-    for candidate in candidates:
-        if Path(candidate).exists():
-            return str(Path(candidate))
-        found = shutil.which(candidate)
-        if found:
-            return found
-    return None
+    if raw and Path(raw).exists():
+        return raw
+    return shutil.which(raw)
 
 
 def codex_default_sandbox() -> str:
@@ -197,6 +365,19 @@ def tail_lines(path: Path, count: int) -> str:
     return "\n".join(tail)
 
 
+def extract_session_id(log_path: Path) -> str:
+    if not log_path.exists():
+        return ""
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines()[:80]:
+            match = SESSION_ID_RE.search(line)
+            if match:
+                return match.group(1)
+    except Exception:
+        return ""
+    return ""
+
+
 def build_run_command(task: str, *, dry_run: bool = False, resume_id: str = "") -> list[str]:
     command = [
         "powershell",
@@ -215,9 +396,15 @@ def build_run_command(task: str, *, dry_run: bool = False, resume_id: str = "") 
     return command
 
 
-def build_codex_command(prompt: str, *, output_path: Path, sandbox: str) -> list[str]:
+def build_codex_command(
+    prompt: str,
+    *,
+    output_path: Path,
+    sandbox: str,
+    resume_session_id: str = "",
+) -> list[str]:
     cli = codex_cli_resolved() or codex_cli()
-    return [
+    command = [
         cli,
         "exec",
         "--skip-git-repo-check",
@@ -229,25 +416,35 @@ def build_codex_command(prompt: str, *, output_path: Path, sandbox: str) -> list
         "never",
         "-o",
         str(output_path),
-        prompt,
     ]
+    if resume_session_id:
+        command.extend(["resume", resume_session_id, prompt])
+    else:
+        command.append(prompt)
+    return command
 
 
 def render_help() -> str:
     return (
         "Telegram TuriX Bridge commands:\n"
         "/chatid - show current chat id\n"
-        "/mode - show the current plain-text mode\n"
-        "/codex <prompt> - ask Codex in read-only mode\n"
-        "/codexw <prompt> - ask Codex with workspace-write sandbox\n"
         "/run <task> - start a TuriX task\n"
-        "/turix <task> - switch plain text back to TuriX\n"
         "/dryrun <task> - validate the TuriX launch command\n"
-        "/resume <agent_id> - resume a TuriX task\n"
-        "/status - show active process details\n"
-        "/logs [N] - show recent log lines\n"
-        "/stop - stop the active process\n"
-        "Plain text follows the current chat mode."
+        "/resume <agent_id> - resume a previous TuriX task\n"
+        "/codex [prompt] - switch to Codex read-only mode, optionally send a prompt now\n"
+        "/codexw [prompt] - switch to Codex workspace-write mode, optionally send a prompt now\n"
+        "/turix [task] - switch plain text back to TuriX, optionally start a task now\n"
+        "/mode - show the current plain-text default for this chat\n"
+        "/session - show the current Codex session binding for this chat\n"
+        "/sessions - list saved Codex sessions for this chat\n"
+        "/newsession [label] - create and switch to a fresh Codex session slot\n"
+        "/switchsession <ref> - switch Codex session by index, bridge id, label, or Codex session id\n"
+        "/renamesession <label> - rename the current Codex session slot\n"
+        "/dropsession <ref> - forget a saved Codex session slot from bridge state\n"
+        "/status - show active task status\n"
+        "/logs [N] - show last log lines\n"
+        "/stop - stop the current TuriX/Codex run\n"
+        "Plain text messages follow the current chat mode. Codex mode keeps using the current chat-bound session."
     )
 
 
@@ -274,7 +471,7 @@ def preflight() -> tuple[bool, str]:
         issues.append(f"missing TuriX runner: {runner}")
     workdir = workdir_path()
     if not workdir.exists():
-        issues.append(f"missing TuriX workdir: {workdir}")
+        issues.append(f"missing workdir: {workdir}")
     codex_path = codex_cli_resolved()
     codex_wd = codex_workdir_path()
     if not codex_wd.exists():
@@ -302,6 +499,63 @@ def describe_chat_mode(state: dict, chat_id: str) -> str:
     return "Current plain-text mode: TuriX"
 
 
+def format_session_entry(entry: dict, *, index: int, is_current: bool) -> str:
+    marker = "*" if is_current else " "
+    codex_session_id = entry.get("codex_session_id") or "<pending first Codex run>"
+    sandbox = entry.get("sandbox") or codex_default_sandbox()
+    used = entry.get("last_used_at") or entry.get("created_at") or "<unknown>"
+    return (
+        f"{marker} {index}. {entry.get('label', '<unnamed>')} [{entry.get('session_key', '?')}]\n"
+        f"   sandbox={sandbox}\n"
+        f"   codex_session_id={codex_session_id}\n"
+        f"   last_used={used}\n"
+        f"   messages={entry.get('message_count', 0)}"
+    )
+
+
+def describe_current_session(state: dict, chat_id: str) -> str:
+    chat_state = codex_chat_state(state, chat_id)
+    entry = current_session_entry(chat_state)
+    if not entry:
+        return (
+            "This chat does not have a bound Codex session yet.\n"
+            "Use /newsession to create one now, or send /codex and the bridge will create one automatically."
+        )
+    sandbox = entry.get("sandbox") or codex_default_sandbox()
+    codex_session_id = entry.get("codex_session_id") or "<pending first Codex run>"
+    return (
+        f"Current Codex session: {entry.get('label', '<unnamed>')} [{entry.get('session_key', '?')}]\n"
+        f"codex_session_id={codex_session_id}\n"
+        f"sandbox={sandbox}\n"
+        f"created_at={entry.get('created_at', '<unknown>')}\n"
+        f"last_used_at={entry.get('last_used_at') or '<never>'}\n"
+        f"messages={entry.get('message_count', 0)}"
+    )
+
+
+def list_sessions_text(state: dict, chat_id: str) -> str:
+    chat_state = codex_chat_state(state, chat_id)
+    ordered = ordered_session_keys(chat_state)
+    if not ordered:
+        return "No saved Codex sessions for this chat yet."
+
+    current_key = current_session_key(chat_state)
+    lines = ["Saved Codex sessions for this chat:"]
+    for index, session_key in enumerate(ordered, start=1):
+        entry = get_session_entry(chat_state, session_key)
+        if not entry:
+            continue
+        lines.append(format_session_entry(entry, index=index, is_current=session_key == current_key))
+    return "\n".join(lines)
+
+
+def active_task_message(state: dict) -> str:
+    pid = state.get("active_pid")
+    if pid and is_pid_running(pid):
+        return f"A task is already running with PID {pid}. Use /status or /stop first."
+    return ""
+
+
 def start_task(
     state: dict,
     chat_id: str,
@@ -312,19 +566,32 @@ def start_task(
     engine: str = "turix",
     sandbox: str = "",
 ) -> str:
-    active_pid = state.get("active_pid")
-    if is_pid_running(active_pid):
-        return "Another task is already running. Use /status or /stop first."
+    conflict = active_task_message(state)
+    if conflict:
+        return conflict
 
     ensure_runtime_dirs()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     mode = "dryrun" if dry_run else "resume" if resume_id else "run"
     reply_path = None
+    session_key = ""
+    codex_session_id = ""
 
     if engine == "codex":
-        mode = "codexw" if sandbox == "workspace-write" else "codex"
+        session_entry = ensure_current_chat_session(state, chat_id, sandbox=sandbox or codex_default_sandbox())
+        session_entry["sandbox"] = sandbox or codex_default_sandbox()
+        session_key = session_entry["session_key"]
+        codex_session_id = str(session_entry.get("codex_session_id", "")).strip()
+        mode = "codex"
+        if session_entry["sandbox"] == "workspace-write":
+            mode = "codexw"
         reply_path = LOG_DIR / f"{timestamp}-{mode}-reply.txt"
-        command = build_codex_command(task, output_path=reply_path, sandbox=sandbox or codex_default_sandbox())
+        command = build_codex_command(
+            task,
+            output_path=reply_path,
+            sandbox=session_entry["sandbox"],
+            resume_session_id=codex_session_id,
+        )
         exec_cwd = str(codex_workdir_path())
     else:
         command = build_run_command(task, dry_run=dry_run, resume_id=resume_id)
@@ -340,6 +607,15 @@ def start_task(
             text=True,
         )
 
+    if engine == "codex":
+        chat_state = codex_chat_state(state, chat_id)
+        session_entry = get_session_entry(chat_state, session_key)
+        if session_entry:
+            session_entry["last_used_at"] = now_text()
+            session_entry["last_log_path"] = str(log_path)
+            session_entry["last_reply_path"] = str(reply_path) if reply_path else ""
+            session_entry["last_prompt"] = task
+
     state.update(
         {
             "active_pid": process.pid,
@@ -351,7 +627,9 @@ def start_task(
             "active_reply_path": str(reply_path) if reply_path else None,
             "active_sandbox": sandbox or None,
             "active_resume_id": resume_id,
-            "last_started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "active_session_key": session_key or None,
+            "active_codex_session_id": codex_session_id or None,
+            "last_started_at": now_text(),
             "completion_notified": False,
             "last_exit_code": None,
         }
@@ -359,27 +637,34 @@ def start_task(
     save_state(state)
 
     if engine == "codex":
-        if sandbox == "workspace-write":
-            return "Switched to Codex write mode. Working on it."
-        return "Switched to Codex chat mode. Working on it."
+        session_entry = ensure_current_chat_session(state, chat_id, sandbox=sandbox or codex_default_sandbox())
+        action = "Continuing" if codex_session_id else "Starting"
+        return (
+            f"{action} Codex session {session_entry.get('label', '<unnamed>')} "
+            f"[{session_entry.get('session_key', '?')}] in {session_entry.get('sandbox', codex_default_sandbox())} mode."
+        )
     if dry_run:
-        return "Started TuriX dry-run check."
+        return "Started TuriX dry run."
     if resume_id:
-        return "Started TuriX resume."
-    return "Switched to TuriX mode. Task started."
+        return "Started TuriX resume task."
+    return "Switched to TuriX mode and started the task."
 
 
 def format_status(state: dict) -> str:
     pid = state.get("active_pid")
     if pid and is_pid_running(pid):
-        return (
-            "Task is running.\n"
-            f"PID: {pid}\n"
-            f"Engine: {state.get('active_engine', 'turix')}\n"
-            f"Mode: {state.get('active_mode', 'run')}\n"
-            f"Task: {state.get('active_task') or '<resume>'}\n"
-            f"Log: {state.get('active_log_path')}"
-        )
+        lines = [
+            "Task is running.",
+            f"PID: {pid}",
+            f"Engine: {state.get('active_engine', 'turix')}",
+            f"Mode: {state.get('active_mode', 'run')}",
+            f"Task: {state.get('active_task') or '<resume>'}",
+            f"Log: {state.get('active_log_path')}",
+        ]
+        session_key = state.get("active_session_key")
+        if session_key:
+            lines.append(f"Session: {session_key}")
+        return "\n".join(lines)
     return (
         "No active task.\n"
         f"Last exit code: {state.get('last_exit_code')}\n"
@@ -387,9 +672,40 @@ def format_status(state: dict) -> str:
     )
 
 
+def update_session_after_completion(state: dict) -> None:
+    if state.get("active_engine") != "codex":
+        return
+
+    chat_id = str(state.get("active_chat_id") or "")
+    session_key = str(state.get("active_session_key") or "")
+    if not chat_id or not session_key:
+        return
+
+    chat_state = codex_chat_state(state, chat_id)
+    entry = get_session_entry(chat_state, session_key)
+    if not entry:
+        return
+
+    log_path_raw = state.get("active_log_path")
+    reply_path_raw = state.get("active_reply_path")
+    if log_path_raw:
+        log_path = Path(str(log_path_raw))
+        entry["last_log_path"] = str(log_path)
+        parsed_session_id = extract_session_id(log_path)
+        if parsed_session_id:
+            entry["codex_session_id"] = parsed_session_id
+            state["active_codex_session_id"] = parsed_session_id
+    if reply_path_raw:
+        entry["last_reply_path"] = str(reply_path_raw)
+    entry["last_used_at"] = now_text()
+    entry["message_count"] = int(entry.get("message_count", 0)) + 1
+    save_state(state)
+
+
 def maybe_notify_completion(state: dict) -> None:
     pid = state.get("active_pid")
     chat_id = state.get("active_chat_id")
+    engine = state.get("active_engine", "turix")
     if not pid or not chat_id:
         return
     if is_pid_running(pid):
@@ -397,15 +713,16 @@ def maybe_notify_completion(state: dict) -> None:
     if state.get("completion_notified"):
         return
 
-    engine = state.get("active_engine", "turix")
+    update_session_after_completion(state)
+
     if engine == "codex":
         reply_path = state.get("active_reply_path")
         reply_text = ""
-        if reply_path and Path(reply_path).exists():
-            reply_text = Path(reply_path).read_text(encoding="utf-8", errors="replace").strip()
-        message = reply_text or "Codex finished, but no displayable reply was captured. Use /logs for details."
+        if reply_path and Path(str(reply_path)).exists():
+            reply_text = Path(str(reply_path)).read_text(encoding="utf-8", errors="replace").strip()
+        message = reply_text or "Codex finished, but no displayable final message was captured. Use /logs for details."
     else:
-        message = "TuriX task finished. Use /status or /logs if you need details."
+        message = "TuriX task finished. Use /status or /logs if you want details."
 
     try:
         send_message(chat_id, message)
@@ -445,6 +762,54 @@ def handle_update(state: dict, update: dict) -> None:
     if command == "mode":
         send_message(chat_id, describe_chat_mode(state, chat_id))
         return
+    if command == "session":
+        send_message(chat_id, describe_current_session(state, chat_id))
+        return
+    if command == "sessions":
+        send_message(chat_id, list_sessions_text(state, chat_id))
+        return
+    if command == "newsession":
+        sandbox = get_chat_mode(state, chat_id).get("sandbox") or codex_default_sandbox()
+        entry = create_chat_session(state, chat_id, label=arg, sandbox=sandbox)
+        send_message(
+            chat_id,
+            (
+                f"Created a new Codex session slot: {entry.get('label', '<unnamed>')} "
+                f"[{entry.get('session_key', '?')}]. Send /codex or plain text in Codex mode to start using it."
+            ),
+        )
+        return
+    if command == "switchsession":
+        if not arg:
+            send_message(chat_id, "Usage: /switchsession <ref>")
+            return
+        entry = switch_chat_session(state, chat_id, arg)
+        if not entry:
+            send_message(chat_id, f"Session not found: {arg}")
+            return
+        send_message(chat_id, f"Switched to Codex session slot {entry.get('label', '<unnamed>')} [{entry.get('session_key', '?')}].")
+        return
+    if command == "renamesession":
+        if not arg:
+            send_message(chat_id, "Usage: /renamesession <label>")
+            return
+        entry = rename_current_chat_session(state, chat_id, arg)
+        if not entry:
+            send_message(chat_id, "This chat does not have a current Codex session slot yet.")
+            return
+        send_message(chat_id, f"Renamed current Codex session slot to {entry.get('label', '<unnamed>')}.")
+        return
+    if command == "dropsession":
+        if not arg:
+            send_message(chat_id, "Usage: /dropsession <ref>")
+            return
+        entry, was_current = drop_chat_session(state, chat_id, arg)
+        if not entry:
+            send_message(chat_id, f"Session not found: {arg}")
+            return
+        suffix = " Current session switched to the latest remaining slot." if was_current else ""
+        send_message(chat_id, f"Forgot Codex session slot {entry.get('label', '<unnamed>')} [{entry.get('session_key', '?')}] from bridge state.{suffix}")
+        return
     if command == "status":
         send_message(chat_id, format_status(state))
         return
@@ -459,7 +824,7 @@ def handle_update(state: dict, update: dict) -> None:
         if not log_path:
             send_message(chat_id, "No log file recorded yet.")
             return
-        send_message(chat_id, tail_lines(Path(log_path), count))
+        send_message(chat_id, tail_lines(Path(str(log_path)), count))
         return
     if command == "stop":
         pid = state.get("active_pid")
@@ -491,45 +856,38 @@ def handle_update(state: dict, update: dict) -> None:
         send_message(chat_id, start_task(state, chat_id, arg, dry_run=True))
         return
     if command in {"run", "turix"}:
-        if not arg:
-            send_message(chat_id, "Usage: /run <task>")
-            return
         set_chat_mode(state, chat_id, engine="turix")
+        if not arg:
+            send_message(chat_id, "Switched plain-text mode to TuriX.")
+            return
         send_message(chat_id, start_task(state, chat_id, arg))
         return
     if command == "codex":
+        sandbox = codex_default_sandbox()
+        set_chat_mode(state, chat_id, engine="codex", sandbox=sandbox)
+        ensure_current_chat_session(state, chat_id, sandbox=sandbox)
         if not arg:
-            send_message(chat_id, "Usage: /codex <prompt>")
+            send_message(chat_id, f"Switched plain-text mode to Codex ({sandbox}).")
             return
-        set_chat_mode(state, chat_id, engine="codex", sandbox=codex_default_sandbox())
-        send_message(
-            chat_id,
-            start_task(state, chat_id, arg, engine="codex", sandbox=codex_default_sandbox()),
-        )
+        send_message(chat_id, start_task(state, chat_id, arg, engine="codex", sandbox=sandbox))
         return
     if command == "codexw":
+        sandbox = "workspace-write"
+        set_chat_mode(state, chat_id, engine="codex", sandbox=sandbox)
+        ensure_current_chat_session(state, chat_id, sandbox=sandbox)
         if not arg:
-            send_message(chat_id, "Usage: /codexw <prompt>")
+            send_message(chat_id, "Switched plain-text mode to Codex (workspace-write).")
             return
-        set_chat_mode(state, chat_id, engine="codex", sandbox="workspace-write")
-        send_message(
-            chat_id,
-            start_task(state, chat_id, arg, engine="codex", sandbox="workspace-write"),
-        )
+        send_message(chat_id, start_task(state, chat_id, arg, engine="codex", sandbox=sandbox))
         return
     if command == "plain":
         mode = get_chat_mode(state, chat_id)
         if mode.get("engine") == "codex":
-            reply = start_task(
-                state,
-                chat_id,
-                arg,
-                engine="codex",
-                sandbox=mode.get("sandbox") or codex_default_sandbox(),
-            )
-        else:
-            reply = start_task(state, chat_id, arg)
-        send_message(chat_id, reply)
+            sandbox = mode.get("sandbox") or codex_default_sandbox()
+            ensure_current_chat_session(state, chat_id, sandbox=sandbox)
+            send_message(chat_id, start_task(state, chat_id, arg, engine="codex", sandbox=sandbox))
+            return
+        send_message(chat_id, start_task(state, chat_id, arg))
         return
 
     send_message(chat_id, render_help())
@@ -572,15 +930,11 @@ def main() -> int:
                 save_state(state)
             try:
                 handle_update(state, update)
-            except Exception:
-                chat_id = (
-                    update.get("message", {})
-                    .get("chat", {})
-                    .get("id")
-                )
+            except Exception as exc:
+                chat_id = update.get("message", {}).get("chat", {}).get("id")
                 if chat_id:
                     try:
-                        send_message(chat_id, "Command failed. Use /status or /logs for details.")
+                        send_message(chat_id, f"Command failed: {exc}")
                     except Exception:
                         pass
 

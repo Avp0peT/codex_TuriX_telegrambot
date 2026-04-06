@@ -1,34 +1,31 @@
 # codex_TuriX_telegrambot
 
-Telegram bridge skill for Windows that lets you talk to local Codex and local TuriX from a Telegram bot.
+Windows-local Telegram bridge skill for talking to local Codex and local TuriX from a Telegram bot.
 
 [中文说明](./README.zh-CN.md)
 
 ## Overview
 
-This repository contains a public, sanitized version of a local Codex skill named `telegram-turix-bridge`.
+This repository contains a public, sanitized version of the `telegram-turix-bridge` Codex skill.
 
 It is designed for people who want to:
-- chat with local Codex from Telegram
+
+- chat with a local Codex instance from Telegram
 - trigger local TuriX desktop automation from Telegram
 - switch between Codex and TuriX inside the same bot chat
-- keep secrets and runtime state outside the repository
+- keep secrets, logs, and runtime state outside the repository
 
-The bridge runs locally on Windows and uses Telegram long polling. It does not require a hosted backend.
+The bridge runs locally on Windows and uses Telegram long polling. No hosted backend is required.
 
-## Features
+## Highlights
 
 - Telegram to Codex bridge via `codex exec`
 - Telegram to TuriX bridge via local `run_turix.ps1`
+- Per-chat persistent Codex sessions
+- Session management commands for creating, listing, switching, renaming, and forgetting saved Codex sessions
 - Per-chat mode memory
-  After `/codex`, plain text continues to go to Codex
-  After `/codexw`, plain text continues to go to Codex workspace-write mode
-  After `/run` or `/turix`, plain text switches back to TuriX
-- Quiet chat output by default
-  Normal replies stay clean
-  Debug details stay behind `/status` and `/logs`
-- Public-safe structure
-  Tokens, chat IDs, logs, runtime state, and machine-specific private data are not included
+- Quiet chat output by default, with `/status` and `/logs` for troubleshooting
+- Public-safe repository layout without tokens, chat ids, or runtime state
 
 ## Repository Layout
 
@@ -41,19 +38,12 @@ telegram-turix-bridge/
     telegram_turix_bridge.py
 ```
 
-## What Is Included
-
-- A Codex-discoverable skill folder at `telegram-turix-bridge/`
-- A Python Telegram bridge built with the standard library
-- A PowerShell launcher for Windows
-- Public-facing setup guidance
-
-## What Is Not Included
+## Not Included
 
 - Telegram bot tokens
-- Allowed chat IDs
+- Allowed chat ids
 - Runtime logs
-- Local state files
+- State files
 - Personal machine paths
 - Private deployment details
 
@@ -65,7 +55,7 @@ Copy the skill into your local Codex skills directory:
 Copy-Item -Recurse -Force .\telegram-turix-bridge "$HOME\.codex\skills\telegram-turix-bridge"
 ```
 
-If you also want TuriX support, install or prepare your local `turix-cua` skill and ensure its runner script exists.
+If you also want TuriX support, prepare your local `turix-cua` skill and make sure its `run_turix.ps1` runner exists.
 
 ## Required Environment Variable
 
@@ -109,23 +99,45 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 
 - `/chatid`
 - `/mode`
-- `/codex <prompt>`
-- `/codexw <prompt>`
+- `/session`
+- `/sessions`
+- `/newsession [label]`
+- `/switchsession <ref>`
+- `/renamesession <label>`
+- `/dropsession <ref>`
+- `/codex [prompt]`
+- `/codexw [prompt]`
 - `/run <task>`
-- `/turix <task>`
+- `/turix [task]`
 - `/dryrun <task>`
 - `/resume <agent_id>`
 - `/status`
 - `/logs [N]`
 - `/stop`
 
+## How Persistent Codex Sessions Work
+
+- Each Telegram chat keeps its own saved Codex session slots.
+- The first `/codex` message starts a fresh Codex session for that chat.
+- Later plain-text messages in Codex mode continue through `codex exec resume <session-id>`.
+- `/newsession` creates a fresh conversation slot without deleting older ones.
+- `/switchsession` lets you jump back to an earlier slot by index, bridge session id, label, or Codex session id.
+
 ## Typical Usage
 
-Use Codex chat mode:
+Start a persistent Codex chat:
 
 ```text
 /codex Explain the current project structure
 Now summarize it in Chinese
+What risks do you see next?
+```
+
+Create a fresh Codex session:
+
+```text
+/newsession release-notes
+/codex Draft release notes for the latest bridge changes
 ```
 
 Switch to TuriX:
