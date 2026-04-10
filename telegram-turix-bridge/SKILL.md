@@ -41,7 +41,8 @@ powershell -ExecutionPolicy Bypass -File "{baseDir}\scripts\launch_bot.ps1"
 5. Use `/newsession` when you want a fresh Codex context without deleting older ones.
 6. Use `/switchsession` to jump back to a saved Codex session.
 7. Use `/run` or `/turix` to switch the chat back to TuriX mode.
-8. Use `/status` or `/logs` only when you need debug details.
+8. Use `/thread` style aliases if you prefer thread wording over session wording.
+9. Use `/status` or `/logs` only when you need debug details.
 
 ## Telegram Commands
 
@@ -55,16 +56,28 @@ powershell -ExecutionPolicy Bypass -File "{baseDir}\scripts\launch_bot.ps1"
   Show the current plain-text mode for this chat.
 - `/session`
   Show the current Codex session binding for this chat.
+- `/thread`
+  Alias of `/session`.
 - `/sessions`
   List saved Codex sessions for this chat.
+- `/threads`
+  Alias of `/sessions`.
 - `/newsession [label]`
   Create and switch to a fresh Codex session slot.
+- `/newthread [label]`
+  Alias of `/newsession`.
 - `/switchsession <ref>`
   Switch to a saved Codex session by index, bridge id, label, or Codex session id.
+- `/switchthread <ref>`
+  Alias of `/switchsession`.
 - `/renamesession <label>`
   Rename the current Codex session slot.
+- `/renamethread <label>`
+  Alias of `/renamesession`.
 - `/dropsession <ref>`
   Forget a saved Codex session slot from bridge state.
+- `/dropthread <ref>`
+  Alias of `/dropsession`.
 - `/codex [prompt]`
   Switch to Codex read-only mode and optionally send a prompt immediately.
 - `/codexw [prompt]`
@@ -124,6 +137,7 @@ Plain text follows the current chat mode:
 - Keep `/codex` on `read-only` by default.
 - Use `/codexw` only for trusted private chats.
 - Do not expose runtime logs or `state.json` publicly.
+- Transient Telegram SSL or connection failures are retried automatically, and undelivered replies are queued for later retry.
 
 ## Resources
 

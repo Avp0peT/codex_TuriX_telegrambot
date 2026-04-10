@@ -22,7 +22,9 @@
 - 通过 `codex exec` 把 Telegram 消息转给本地 Codex
 - 通过本地 `run_turix.ps1` 把 Telegram 消息转给 TuriX
 - 按 chat 持久保存 Codex 会话
+- 支持线程风格别名命令：`/thread`、`/threads`、`/newthread`、`/switchthread`
 - 提供会话管理命令：新建、查看、切换、重命名、删除
+- Telegram 网络瞬时异常时自动重试，并对未送达消息进行补发
 - 按 chat 记住当前模式
 - 默认对话输出保持干净，调试信息通过 `/status` 和 `/logs` 查看
 - 公开仓库不包含 token、chat id、运行日志和状态文件
@@ -100,11 +102,17 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 - `/chatid`
 - `/mode`
 - `/session`
+- `/thread`
 - `/sessions`
+- `/threads`
 - `/newsession [label]`
+- `/newthread [label]`
 - `/switchsession <ref>`
+- `/switchthread <ref>`
 - `/renamesession <label>`
+- `/renamethread <label>`
 - `/dropsession <ref>`
+- `/dropthread <ref>`
 - `/codex [prompt]`
 - `/codexw [prompt]`
 - `/run <task>`
@@ -122,6 +130,13 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 - 之后在 Codex 模式下发送普通文本，会通过 `codex exec resume <session-id>` 继续同一个上下文。
 - `/newsession` 会创建一个新的会话槽位，但不会删除旧会话。
 - `/switchsession` 可以按序号、bridge 会话 id、标签名或 Codex session id 切回旧会话。
+- `/thread` 这一组命令只是对同一套会话槽位的更直观别名。
+
+## 网络稳定性
+
+- Telegram API 调用在瞬时 SSL 或连接失败时会自动重试。
+- 如果回复暂时发不出去，会先写入本地状态，后续循环恢复网络后自动补发。
+- 临时的 Telegram 网络波动不应该再直接把整个 bridge 打死。
 
 ## 典型用法
 
@@ -133,11 +148,13 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 接下来最值得优先处理的风险是什么
 ```
 
-新开一个独立会话：
+按“线程”方式切换上下文：
 
 ```text
-/newsession release-notes
+/newthread 发布说明
 /codex 为最新的 bridge 改动起草一份发布说明
+/threads
+/switchthread 1
 ```
 
 切换到 TuriX：

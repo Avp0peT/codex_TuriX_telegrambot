@@ -1,10 +1,13 @@
 import json
 import os
 import re
+import socket
+import ssl
 import shutil
 import subprocess
 import sys
 import time
+import http.client
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -294,6 +297,16 @@ def api_url(method: str) -> str:
     return f"https://api.telegram.org/bot{telegram_token()}/{method}"
 
 
+def is_transient_network_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, (ssl.SSLError, TimeoutError, socket.timeout, ConnectionResetError, ConnectionAbortedError)):
+            return True
+        if isinstance(reason, OSError):
+            return True
+    return isinstance(exc, (ssl.SSLError, TimeoutError, socket.timeout, ConnectionResetError, ConnectionAbortedError, http.client.RemoteDisconnected))
+
+
 def api_call(method: str, payload: dict | None = None) -> dict:
     data = json.dumps(payload or {}).encode("utf-8")
     request = urllib.request.Request(
@@ -302,12 +315,62 @@ def api_call(method: str, payload: dict | None = None) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        body = response.read().decode("utf-8")
+    max_attempts = int(env("TELEGRAM_API_MAX_ATTEMPTS", "4") or "4")
+    max_attempts = min(max(max_attempts, 1), 8)
+    body = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                body = response.read().decode("utf-8")
+            break
+        except Exception as exc:
+            if attempt == max_attempts or not is_transient_network_error(exc):
+                raise
+            wait_time = min(8.0, 1.5 * attempt)
+            print(f"telegram api retry {attempt}/{max_attempts} for {method}: {exc}", file=sys.stderr)
+            time.sleep(wait_time)
     parsed = json.loads(body)
     if not parsed.get("ok"):
         raise RuntimeError(f"Telegram API {method} failed: {parsed}")
     return parsed["result"]
+
+
+def pending_messages(state: dict) -> list[dict]:
+    pending = state.get("pending_messages")
+    if isinstance(pending, list):
+        return pending
+    pending = []
+    state["pending_messages"] = pending
+    return pending
+
+
+def queue_pending_message(state: dict, chat_id: str | int, text: str) -> None:
+    if not text:
+        return
+    pending_messages(state).append({"chat_id": str(chat_id), "text": text, "queued_at": now_text()})
+    save_state(state)
+
+
+def flush_pending_messages(state: dict) -> None:
+    pending = pending_messages(state)
+    if not pending:
+        return
+
+    remaining: list[dict] = []
+    for index, item in enumerate(pending):
+        chat_id = str(item.get("chat_id", "")).strip()
+        text = str(item.get("text", ""))
+        if not chat_id or not text:
+            continue
+        try:
+            send_message(chat_id, text)
+        except Exception as exc:
+            print(f"pending message delivery failed: {exc}", file=sys.stderr)
+            remaining.append(item)
+            remaining.extend(pending[index + 1 :])
+            break
+    state["pending_messages"] = remaining
+    save_state(state)
 
 
 def send_message(chat_id: str | int, text: str) -> None:
@@ -436,11 +499,17 @@ def render_help() -> str:
         "/turix [task] - switch plain text back to TuriX, optionally start a task now\n"
         "/mode - show the current plain-text default for this chat\n"
         "/session - show the current Codex session binding for this chat\n"
+        "/thread - alias of /session\n"
         "/sessions - list saved Codex sessions for this chat\n"
+        "/threads - alias of /sessions\n"
         "/newsession [label] - create and switch to a fresh Codex session slot\n"
+        "/newthread [label] - alias of /newsession\n"
         "/switchsession <ref> - switch Codex session by index, bridge id, label, or Codex session id\n"
+        "/switchthread <ref> - alias of /switchsession\n"
         "/renamesession <label> - rename the current Codex session slot\n"
+        "/renamethread <label> - alias of /renamesession\n"
         "/dropsession <ref> - forget a saved Codex session slot from bridge state\n"
+        "/dropthread <ref> - alias of /dropsession\n"
         "/status - show active task status\n"
         "/logs [N] - show last log lines\n"
         "/stop - stop the current TuriX/Codex run\n"
@@ -726,6 +795,9 @@ def maybe_notify_completion(state: dict) -> None:
 
     try:
         send_message(chat_id, message)
+    except Exception as exc:
+        print(f"completion notify failed: {exc}", file=sys.stderr)
+        queue_pending_message(state, chat_id, message)
     finally:
         state["completion_notified"] = True
         state["last_exit_code"] = "finished"
@@ -762,13 +834,13 @@ def handle_update(state: dict, update: dict) -> None:
     if command == "mode":
         send_message(chat_id, describe_chat_mode(state, chat_id))
         return
-    if command == "session":
+    if command in {"session", "thread"}:
         send_message(chat_id, describe_current_session(state, chat_id))
         return
-    if command == "sessions":
+    if command in {"sessions", "threads"}:
         send_message(chat_id, list_sessions_text(state, chat_id))
         return
-    if command == "newsession":
+    if command in {"newsession", "newthread"}:
         sandbox = get_chat_mode(state, chat_id).get("sandbox") or codex_default_sandbox()
         entry = create_chat_session(state, chat_id, label=arg, sandbox=sandbox)
         send_message(
@@ -779,33 +851,33 @@ def handle_update(state: dict, update: dict) -> None:
             ),
         )
         return
-    if command == "switchsession":
+    if command in {"switchsession", "switchthread"}:
         if not arg:
-            send_message(chat_id, "Usage: /switchsession <ref>")
+            send_message(chat_id, "Usage: /switchthread <ref>")
             return
         entry = switch_chat_session(state, chat_id, arg)
         if not entry:
-            send_message(chat_id, f"Session not found: {arg}")
+            send_message(chat_id, f"Thread not found: {arg}")
             return
         send_message(chat_id, f"Switched to Codex session slot {entry.get('label', '<unnamed>')} [{entry.get('session_key', '?')}].")
         return
-    if command == "renamesession":
+    if command in {"renamesession", "renamethread"}:
         if not arg:
-            send_message(chat_id, "Usage: /renamesession <label>")
+            send_message(chat_id, "Usage: /renamethread <label>")
             return
         entry = rename_current_chat_session(state, chat_id, arg)
         if not entry:
-            send_message(chat_id, "This chat does not have a current Codex session slot yet.")
+            send_message(chat_id, "This chat does not have a current Codex thread yet.")
             return
         send_message(chat_id, f"Renamed current Codex session slot to {entry.get('label', '<unnamed>')}.")
         return
-    if command == "dropsession":
+    if command in {"dropsession", "dropthread"}:
         if not arg:
-            send_message(chat_id, "Usage: /dropsession <ref>")
+            send_message(chat_id, "Usage: /dropthread <ref>")
             return
         entry, was_current = drop_chat_session(state, chat_id, arg)
         if not entry:
-            send_message(chat_id, f"Session not found: {arg}")
+            send_message(chat_id, f"Thread not found: {arg}")
             return
         suffix = " Current session switched to the latest remaining slot." if was_current else ""
         send_message(chat_id, f"Forgot Codex session slot {entry.get('label', '<unnamed>')} [{entry.get('session_key', '?')}] from bridge state.{suffix}")
@@ -910,7 +982,14 @@ def main() -> int:
     print("Telegram bridge started.")
 
     while True:
-        maybe_notify_completion(state)
+        try:
+            flush_pending_messages(state)
+        except Exception as exc:
+            print(f"pending delivery error: {exc}", file=sys.stderr)
+        try:
+            maybe_notify_completion(state)
+        except Exception as exc:
+            print(f"bridge completion error: {exc}", file=sys.stderr)
         try:
             updates = get_updates(offset)
         except urllib.error.URLError as exc:
@@ -936,7 +1015,7 @@ def main() -> int:
                     try:
                         send_message(chat_id, f"Command failed: {exc}")
                     except Exception:
-                        pass
+                        queue_pending_message(state, chat_id, f"Command failed: {exc}")
 
 
 if __name__ == "__main__":

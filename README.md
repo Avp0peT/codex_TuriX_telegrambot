@@ -22,7 +22,9 @@ The bridge runs locally on Windows and uses Telegram long polling. No hosted bac
 - Telegram to Codex bridge via `codex exec`
 - Telegram to TuriX bridge via local `run_turix.ps1`
 - Per-chat persistent Codex sessions
+- Thread-style aliases for session switching, such as `/thread`, `/threads`, `/newthread`, and `/switchthread`
 - Session management commands for creating, listing, switching, renaming, and forgetting saved Codex sessions
+- Retry and deferred delivery for transient Telegram API network failures
 - Per-chat mode memory
 - Quiet chat output by default, with `/status` and `/logs` for troubleshooting
 - Public-safe repository layout without tokens, chat ids, or runtime state
@@ -100,11 +102,17 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 - `/chatid`
 - `/mode`
 - `/session`
+- `/thread`
 - `/sessions`
+- `/threads`
 - `/newsession [label]`
+- `/newthread [label]`
 - `/switchsession <ref>`
+- `/switchthread <ref>`
 - `/renamesession <label>`
+- `/renamethread <label>`
 - `/dropsession <ref>`
+- `/dropthread <ref>`
 - `/codex [prompt]`
 - `/codexw [prompt]`
 - `/run <task>`
@@ -122,6 +130,13 @@ powershell -ExecutionPolicy Bypass -File .\telegram-turix-bridge\scripts\launch_
 - Later plain-text messages in Codex mode continue through `codex exec resume <session-id>`.
 - `/newsession` creates a fresh conversation slot without deleting older ones.
 - `/switchsession` lets you jump back to an earlier slot by index, bridge session id, label, or Codex session id.
+- `/thread` and related thread commands are user-friendly aliases for the same saved Codex session slots.
+
+## Network Resilience
+
+- Telegram API calls retry automatically on transient SSL or connection failures.
+- If a reply cannot be delivered immediately, it is queued in local state and retried on the next successful loop.
+- Temporary Telegram network issues should no longer kill the bridge process.
 
 ## Typical Usage
 
